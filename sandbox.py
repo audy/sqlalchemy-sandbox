@@ -2,18 +2,30 @@
 
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
-import sqlparse
 
+from sqlalchemy.orm import joinedload, subqueryload, subqueryload_all, joinedload_all
+
+import sqlparse
 import pygments
 from pygments.lexers.sql import SqlLexer
-from pygments.formatters.terminal256 import Terminal256Formatter
+from pygments.formatters.terminal import TerminalFormatter
 
 app = Flask(__name__)
 
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-# app.config["SQLALCHEMY_ECHO"] = True
+app.config["SQLALCHEMY_ECHO"] = True
 db = SQLAlchemy(app)
+
+
+def pretty_print_query(query):
+    """
+    Converts your SQLALchemy query object into pretty SQL Code
+    """
+    parsed_query = sqlparse.format(str(query), reindent=True)
+    lexer = SqlLexer()
+    formatter = TerminalFormatter(bg="dark")
+    print(pygments.highlight(parsed_query, lexer, formatter))
 
 
 class FoodTruck(db.Model):
@@ -25,6 +37,8 @@ class FoodTruck(db.Model):
     menu_items = db.relationship("MenuItem", back_populates="food_truck")
     employees = db.relationship("Employee", back_populates="food_truck")
 
+    name = db.Column(db.String(80), unique=True, nullable=False)
+
     def __repr__(self):
         return f'<FoodTruck type={self.type} id={self.id} name="{self.name}">'
 
@@ -33,8 +47,6 @@ class TacoTruck(FoodTruck):
 
     id = db.Column(db.Integer, db.ForeignKey("food_truck.id"), primary_key=True)
     __mapper_args__ = {"polymorphic_identity": "taco_truck"}
-
-    name = db.Column(db.String(80), unique=True, nullable=False)
 
 
 class Person(db.Model):
@@ -45,6 +57,10 @@ class Person(db.Model):
 
     first_name = db.Column(db.String(50))
     last_name = db.Column(db.String(50))
+
+    @property
+    def name(self):
+        return f"{self.last_name or 'NA'}, {self.first_name or 'NA'}"
 
 
 class Employee(Person):
@@ -109,7 +125,7 @@ def main():
 
     db.create_all()
 
-    los_reyes = TacoTruck(
+    taco_truck = TacoTruck(
         name="Hell's Chariot",
         menu_items=[
             MenuItem(name="Super Burrito", price=10_00),
@@ -122,7 +138,7 @@ def main():
         ],
     )
 
-    db.session.add(los_reyes)
+    db.session.add(taco_truck)
     db.session.commit()
 
     customer = Customer(first_name="Frenchy")
@@ -130,33 +146,54 @@ def main():
     db.session.add(customer)
     db.session.commit()
 
-    order = Order(
-        menu_items=[los_reyes.menu_items[0], los_reyes.menu_items[1]],
-        customer=customer,
-        employee=los_reyes.employees[0],
-    )
+    orders = [
+        Order(
+            menu_items=[taco_truck.menu_items[0], taco_truck.menu_items[1]],
+            customer=customer,
+            employee=taco_truck.employees[0],
+        ),
+        Order(
+            menu_items=[taco_truck.menu_items[1]],
+            customer=customer,
+            employee=taco_truck.employees[1],
+        ),
+    ]
 
-    db.session.add(order)
+    db.session.add_all(orders)
     db.session.commit()
 
     # let's try some crazy joining
 
-    # for each customer, join their orders, taco trucks and employees
+    # for each customer, join their orders, the orders' employee taco trucks and employees
     # and do it eagerly
 
-    query = db.session.query(Customer).join(Order)
+    query = (
+        db.session.query(Order)
+        .join(Order.menu_items)
+        .join(MenuItem.food_truck)
+        .options(
+            joinedload(Order.menu_items),
+            joinedload(Order.customer),
+            joinedload(Order.employee).joinedload(Employee.food_truck),
+        )
+        .filter(MenuItem.price == 7_00)
+    )
 
-    parsed_query = sqlparse.format(str(query), reindent=True)
+    pretty_print_query(query)
 
-    lexer = SqlLexer()
-    formatter = Terminal256Formatter()
+    results = query.all()
 
-    print(pygments.highlight(parsed_query, lexer, formatter))
+    print("-" * 25 + " STARTING " + "-" * 25)
 
-    query.all()
-
-    for result in query:
-        print(result)
+    for order in results:
+        for menu_item in order.menu_items:
+            print(
+                order.customer.name,
+                menu_item.name,
+                menu_item.price,
+                order.employee.food_truck.name,
+                order.employee.food_truck.type,
+            )
 
 
 if __name__ == "__main__":
